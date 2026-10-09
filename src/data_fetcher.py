@@ -16,11 +16,27 @@ class DataFetcher:
         self.client = client
 
     def get_upcoming_matches(
-        self, days_ahead: int = 14
+        self,
+        date_from: str = "",
+        date_to: str = "",
+        days_ahead: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        """Devuelve partidos programados usando el rango de fechas oficial de TheStatsAPI.
+
+        Compatibilidad:
+        - Llamadas nuevas: get_upcoming_matches(date_from='2026-10-09', date_to='2026-10-09')
+        - Llamadas antiguas: get_upcoming_matches(days_ahead=14)
+        """
         today = datetime.now(timezone.utc).date()
-        date_from = today.isoformat()
-        date_to = (today + timedelta(days=days_ahead)).isoformat()
+
+        if days_ahead is not None:
+            date_from = date_from.strip() if date_from else today.isoformat()
+            date_to = (
+                date_to.strip() if date_to else (today + timedelta(days=days_ahead)).isoformat()
+            )
+        else:
+            date_from = date_from.strip() if date_from else today.isoformat()
+            date_to = date_to.strip() if date_to else date_from
 
         logger.info("Obteniendo partidos scheduled %s → %s", date_from, date_to)
         all_matches: List[Dict[str, Any]] = []
