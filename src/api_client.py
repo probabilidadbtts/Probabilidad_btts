@@ -46,7 +46,7 @@ class StatsAPIClient:
         retry_strategy = Retry(
             total=MAX_RETRIES,
             status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["GET"],
+            allowed_methods=["GET"],
             backoff_factor=RETRY_BACKOFF,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
