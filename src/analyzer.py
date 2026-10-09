@@ -41,18 +41,10 @@ class BTTSAnalyzer:
         min_pct: float = 80.0,
         top_n: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Analiza partidos con todos los modelos y devuelve un ensemble.
-
-        Args:
-            upcoming: Lista de partidos programados
-            min_pct: Umbral mínimo de BTTS para incluir en resultados
-            top_n: Número máximo de partidos a devolver
-
-        Returns:
-            Lista de partidos con predicciones (ordenados por ensemble DESC)
-        """
+        """Analiza partidos con todos los modelos y devuelve un ensemble."""
         team_cache: Dict[str, List[Dict[str, Any]]] = {}
         results: List[Dict[str, Any]] = []
+        total_matches = len(upcoming)
 
         for idx, match in enumerate(upcoming, 1):
             home = match.get("home_team") or {}
@@ -60,18 +52,17 @@ class BTTSAnalyzer:
             home_id = home.get("id")
             away_id = away.get("id")
             if not home_id or not away_id:
-                logger.debug("[%d/%d] Saltando partido sin IDs", idx, len(upcoming))
+                logger.debug("[%d/%d] Saltando partido sin IDs", idx, total_matches)
                 continue
 
             logger.info(
                 "[%d/%d] %s vs %s",
                 idx,
-                len(upcoming),
+                total_matches,
                 home.get("name"),
                 away.get("name"),
             )
 
-            # Cachear los últimos partidos de cada equipo
             if home_id not in team_cache:
                 team_cache[home_id] = self.fetcher.get_team_finished_matches(
                     home_id, n=30
@@ -84,7 +75,6 @@ class BTTSAnalyzer:
             home_m = team_cache[home_id]
             away_m = team_cache[away_id]
 
-            # Ejecutar todos los modelos
             scores = {}
             for model in self.models:
                 try:
@@ -99,7 +89,6 @@ class BTTSAnalyzer:
                     )
                     scores[model.name] = 0.0
 
-            # Ensemble: promedio de todos los modelos
             valid = [v for v in scores.values() if v > 0]
             ensemble = round(sum(valid) / len(valid), 2) if valid else 0.0
 
@@ -123,7 +112,7 @@ class BTTSAnalyzer:
         logger.info(
             "Análisis completado: %d/%d partidos cumplen umbral de %.1f%%",
             len(final),
-            len(upstream),
+            total_matches,
             min_pct,
         )
         return final
