@@ -1,4 +1,4 @@
-"""Cliente HTTP robusto para TheStatsAPI."""
+"""Cliente HTTP robusto para TheStatsAPI con reintentos y manejo de rate limits."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import time
 from typing import Any, Dict, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,8 @@ RATE_LIMIT_SLEEP = 0.30
 
 
 class StatsAPIClient:
+    """Cliente de TheStatsAPI con manejo de reintentos y rate limiting."""
+
     def __init__(self, api_key: Optional[str] = None) -> None:
         self.api_key = api_key or os.environ.get("THESTATSAPI_KEY")
         if not self.api_key:
@@ -26,20 +30,48 @@ class StatsAPIClient:
                 "THESTATSAPI_KEY no está definida. "
                 "Exporta la variable o usa un archivo .env"
             )
-        self.session = requests.Session()
-        self.session.headers.update(
+        self.session = self._create_session()
+
+    def _create_session(self) -> requests.Session:
+        """Crea una sesión con reintentos automáticos."""
+        session = requests.Session()
+        session.headers.update(
             {
                 "Authorization": f"Bearer {self.api_key}",
                 "Accept": "application/json",
                 "User-Agent": "BTTS-Predictor/2.0 (production)",
             }
         )
+        # Configurar reintentos automáticos para errores de conexión
+        retry_strategy = Retry(
+            total=MAX_RETRIES,
+            status_forcelist=[429, 500, 502, 503, 504],
+            method_whitelist=["GET"],
+            backoff_factor=RETRY_BACKOFF,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
 
     def get(
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        """Realiza una solicitud GET con manejo de errores y rate limits.
+
+        Args:
+            endpoint: Ruta de la API (ej: /football/matches)
+            params: Diccionario de parámetros de consulta
+
+        Returns:
+            JSON response como diccionario
+
+        Raises:
+            EnvironmentError: Si no hay API key
+            requests.RequestException: Si todas los reintentos fallan
+        """
         url = f"{BASE_URL}{endpoint}"
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -57,7 +89,10 @@ class StatsAPIClient:
             except requests.RequestException as exc:
                 logger.warning(
                     "Intento %d/%d fallido (%s): %s",
-                    attempt, MAX_RETRIES, endpoint, exc
+                    attempt,
+                    MAX_RETRIES,
+                    endpoint,
+                    exc,
                 )
                 if attempt == MAX_RETRIES:
                     raise

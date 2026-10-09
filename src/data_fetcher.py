@@ -1,4 +1,4 @@
-"""Obtención de partidos futuros e históricos reales."""
+"""Obtención de partidos futuros e históricos desde TheStatsAPI."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 class DataFetcher:
+    """Obtiene datos de partidos desde TheStatsAPI con paginación."""
+
     def __init__(self, client: StatsAPIClient) -> None:
         self.client = client
 
@@ -21,21 +23,32 @@ class DataFetcher:
         date_to: str = "",
         days_ahead: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Devuelve partidos programados usando el rango de fechas oficial de TheStatsAPI.
+        """Obtiene partidos programados en un rango de fechas.
 
-        Compatibilidad:
-        - Llamadas nuevas: get_upcoming_matches(date_from='2026-10-09', date_to='2026-10-09')
-        - Llamadas antiguas: get_upcoming_matches(days_ahead=14)
+        Soporta dos formas de llamada:
+        1. Con rango explícito: get_upcoming_matches(date_from='2026-10-09', date_to='2026-10-10')
+        2. Con días adelante (legado): get_upcoming_matches(days_ahead=14)
+
+        Args:
+            date_from: Fecha de inicio (YYYY-MM-DD). Si está vacío y no hay days_ahead,
+                      usa hoy (UTC)
+            date_to: Fecha de fin (YYYY-MM-DD). Si está vacío, usa date_from
+            days_ahead: (Legado) Número de días adelante desde hoy. Ignorado si
+                       date_from o date_to se proporcionan explícitamente.
+
+        Returns:
+            Lista de diccionarios con información de partidos programados.
         """
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(timezone.utc).date().isoformat()
 
-        if days_ahead is not None:
-            date_from = date_from.strip() if date_from else today.isoformat()
+        # Lógica de compatibilidad: days_ahead solo se usa si ambos date_from/to están vacíos
+        if days_ahead is not None and not date_from and not date_to:
+            date_from = today
             date_to = (
-                date_to.strip() if date_to else (today + timedelta(days=days_ahead)).isoformat()
-            )
+                datetime.fromisoformat(today) + timedelta(days=days_ahead)
+            ).date().isoformat()
         else:
-            date_from = date_from.strip() if date_from else today.isoformat()
+            date_from = date_from.strip() if date_from else today
             date_to = date_to.strip() if date_to else date_from
 
         logger.info("Obteniendo partidos scheduled %s → %s", date_from, date_to)
@@ -60,18 +73,32 @@ class DataFetcher:
             all_matches.extend(matches)
             meta = data.get("meta", {})
             total_pages = meta.get("total_pages", 1)
-            logger.info("Página %d/%d → %d partidos", page, total_pages, len(all_matches))
+            logger.info(
+                "Página %d/%d → %d partidos (total: %d)",
+                page,
+                total_pages,
+                len(matches),
+                len(all_matches),
+            )
             if page >= total_pages:
                 break
             page += 1
 
-        logger.info("Total partidos futuros: %d", len(all_matches))
+        logger.info("Total partidos futuros obtenidos: %d", len(all_matches))
         return all_matches
 
     def get_team_finished_matches(
         self, team_id: str, n: int = 30
     ) -> List[Dict[str, Any]]:
-        """Últimos N partidos finalizados (ordenados más reciente primero)."""
+        """Obtiene los últimos N partidos finalizados de un equipo.
+
+        Args:
+            team_id: ID del equipo en TheStatsAPI
+            n: Número máximo de partidos a devolver
+
+        Returns:
+            Lista de partidos ordenados (más reciente primero)
+        """
         data = self.client.get(
             "/football/matches",
             params={
