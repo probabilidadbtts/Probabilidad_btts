@@ -1,9 +1,33 @@
 name: Daily BTTS Predictor
 
 on:
+  # Ejecución automática todos los días a las 06:00 UTC → solo partidos de HOY
   schedule:
-    - cron: "0 6 * * *"   # 06:00 UTC todos los días
-  workflow_dispatch:       # permite ejecución manual
+    - cron: "0 6 * * *"
+
+  # Ejecución manual con selector de fechas
+  workflow_dispatch:
+    inputs:
+      date_from:
+        description: "Fecha desde (YYYY-MM-DD). Dejar vacío = hoy"
+        required: false
+        type: string
+        default: ""
+      date_to:
+        description: "Fecha hasta (YYYY-MM-DD). Dejar vacío = mismo día que date_from"
+        required: false
+        type: string
+        default: ""
+      min_pct:
+        description: "Umbral mínimo de Ensemble BTTS (%)"
+        required: false
+        type: string
+        default: "80"
+      top_n:
+        description: "Máximo de partidos a devolver"
+        required: false
+        type: string
+        default: "20"
 
 jobs:
   run-btts:
@@ -14,7 +38,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -25,14 +49,48 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Determinar rango de fechas
+        id: dates
+        run: |
+          # Si es schedule → forzamos solo HOY
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            TODAY=$(date -u +%Y-%m-%d)
+            echo "date_from=$TODAY" >> $GITHUB_OUTPUT
+            echo "date_to=$TODAY" >> $GITHUB_OUTPUT
+            echo "Modo schedule → solo partidos de hoy: $TODAY"
+          else
+            # workflow_dispatch
+            DF="${{ github.event.inputs.date_from }}"
+            DT="${{ github.event.inputs.date_to }}"
+            if [ -z "$DF" ]; then
+              DF=$(date -u +%Y-%m-%d)
+            fi
+            if [ -z "$DT" ]; then
+              DT="$DF"
+            fi
+            echo "date_from=$DF" >> $GITHUB_OUTPUT
+            echo "date_to=$DT" >> $GITHUB_OUTPUT
+            echo "Modo manual → rango: $DF → $DT"
+          fi
+
       - name: Run BTTS Analyzer
         env:
           THESTATSAPI_KEY: ${{ secrets.THESTATSAPI_KEY }}
-        run: python main.py
+          DATE_FROM: ${{ steps.dates.outputs.date_from }}
+          DATE_TO: ${{ steps.dates.outputs.date_to }}
+          MIN_PCT: ${{ github.event.inputs.min_pct || '80' }}
+          TOP_N: ${{ github.event.inputs.top_n || '20' }}
+        run: |
+          python main.py \
+            --date-from "$DATE_FROM" \
+            --date-to "$DATE_TO" \
+            --min-pct "$MIN_PCT" \
+            --top-n "$TOP_N"
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
-          name: btts-top20
-          path: btts_top20_*.csv
+          name: btts-${{ steps.dates.outputs.date_from }}-to-${{ steps.dates.outputs.date_to }}
+          path: btts_*.csv
           retention-days: 14
+          if-no-files-found: warn
