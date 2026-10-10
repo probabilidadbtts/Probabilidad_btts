@@ -5,9 +5,9 @@ import logging
 import os
 from typing import Sequence
 
-from .config import Settings
 from .api_client import StatsAPIClient
 from .analyzer import BTTSAnalyzer
+from .config import Settings
 from .data_fetcher import DataFetcher
 from .exporter import export_csv, print_table
 
@@ -28,7 +28,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def cli(argv: Sequence[str] | None = None) -> int:
-    """Ejecuta el flujo principal de predicción."""
+    """Ejecuta el flujo principal de predicción con análisis de bajas."""
     args = parse_args(argv)
     settings = Settings.from_dict(
         {
@@ -54,7 +54,7 @@ def cli(argv: Sequence[str] | None = None) -> int:
     try:
         client = StatsAPIClient()
         fetcher = DataFetcher(client)
-        analyzer = BTTSAnalyzer(fetcher)
+        analyzer = BTTSAnalyzer(fetcher, client)
 
         upcoming = fetcher.get_upcoming_matches(
             date_from=settings.date_from,

@@ -1,4 +1,4 @@
-"""Orquestador principal de análisis multi-modelo de BTTS."""
+"""Orquestador principal de análisis multi-modelo de BTTS con impacto de bajas."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 from typing import Any, Dict, List
 
 from .data_fetcher import DataFetcher
+from .injuries import InjuryImpactAnalyzer
 from .models import (
     BivariatePoisson,
     CatBoostBTTS,
@@ -18,10 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class BTTSAnalyzer:
-    """Orquesta 5 modelos para predecir BTTS con ensemble."""
+    """Orquesta 5 modelos para predecir BTTS con ensemble, considerando bajas."""
 
-    def __init__(self, fetcher: DataFetcher) -> None:
+    def __init__(self, fetcher: DataFetcher, client: Any) -> None:
         self.fetcher = fetcher
+        self.client = client
+        self.injury_analyzer = InjuryImpactAnalyzer()
         self.models = [
             HistoricalBTTS(n=10),
             BivariatePoisson(n=20),
@@ -41,7 +44,7 @@ class BTTSAnalyzer:
         min_pct: float = 80.0,
         top_n: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Analiza partidos con todos los modelos y devuelve un ensemble."""
+        """Analiza partidos con todos los modelos y devuelve un ensemble ajustado por bajas."""
         team_cache: Dict[str, List[Dict[str, Any]]] = {}
         results: List[Dict[str, Any]] = []
         total_matches = len(upcoming)
@@ -92,7 +95,17 @@ class BTTSAnalyzer:
             valid = [v for v in scores.values() if v > 0]
             ensemble = round(sum(valid) / len(valid), 2) if valid else 0.0
 
-            if ensemble >= min_pct:
+            injury_data = self.injury_analyzer.analyze_injuries(
+                str(home_id), str(away_id), self.client
+            )
+
+            adjusted_ensemble = self.injury_analyzer.adjust_ensemble_by_injuries(
+                ensemble,
+                injury_data["home_injury_impact"],
+                injury_data["away_injury_impact"],
+            )
+
+            if adjusted_ensemble >= min_pct:
                 results.append(
                     {
                         "match_id": match.get("id"),
@@ -104,13 +117,18 @@ class BTTSAnalyzer:
                         "away_team_id": away_id,
                         **{f"prob_{k}": v for k, v in scores.items()},
                         "ensemble_pct": ensemble,
+                        "adjusted_ensemble_pct": adjusted_ensemble,
+                        "home_injury_impact": injury_data["home_injury_impact"],
+                        "away_injury_impact": injury_data["away_injury_impact"],
+                        "home_injuries_count": len(injury_data["home_injuries"]),
+                        "away_injuries_count": len(injury_data["away_injuries"]),
                     }
                 )
 
-        results.sort(key=lambda r: r["ensemble_pct"], reverse=True)
+        results.sort(key=lambda r: r["adjusted_ensemble_pct"], reverse=True)
         final = results[:top_n]
         logger.info(
-            "Análisis completado: %d/%d partidos cumplen umbral de %.1f%%",
+            "Análisis completado: %d/%d partidos cumplen umbral de %.1f%% (post-bajas)",
             len(final),
             total_matches,
             min_pct,
