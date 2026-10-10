@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .api_client import StatsAPIClient
+from .top_leagues import LeagueFilter
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,13 @@ class DataFetcher:
                       usa hoy (UTC)
             date_to: Fecha de fin (YYYY-MM-DD). Si está vacío, usa date_from
             days_ahead: (Legado) Número de días adelante desde hoy. Ignorado si
-                       date_from o date_to se proporcionan explícitamente.
+                        date_from o date_to se proporcionan explícitamente.
 
         Returns:
             Lista de diccionarios con información de partidos programados.
         """
         today = datetime.now(timezone.utc).date().isoformat()
 
-        # Lógica de compatibilidad: days_ahead solo se usa si ambos date_from/to están vacíos
         if days_ahead is not None and not date_from and not date_to:
             date_from = today
             date_to = (
@@ -70,21 +70,24 @@ class DataFetcher:
             matches = data.get("data", [])
             if not matches:
                 break
-            all_matches.extend(matches)
+
+            filtered_matches = LeagueFilter.filter_matches(matches)
+            all_matches.extend(filtered_matches)
+
             meta = data.get("meta", {})
             total_pages = meta.get("total_pages", 1)
             logger.info(
-                "Página %d/%d → %d partidos (total: %d)",
+                "Página %d/%d → %d partidos (top leagues) (total: %d)",
                 page,
                 total_pages,
-                len(matches),
+                len(filtered_matches),
                 len(all_matches),
             )
             if page >= total_pages:
                 break
             page += 1
 
-        logger.info("Total partidos futuros obtenidos: %d", len(all_matches))
+        logger.info("Total partidos futuros (20 ligas top) obtenidos: %d", len(all_matches))
         return all_matches
 
     def get_team_finished_matches(
