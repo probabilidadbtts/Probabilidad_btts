@@ -54,7 +54,7 @@ def cli(argv: Sequence[str] | None = None) -> int:
     try:
         client = StatsAPIClient()
         fetcher = DataFetcher(client)
-        analyzer = BTTSAnalyzer(fetcher, client)
+        analyzer = BTTSAnalyzer(fetcher)
 
         upcoming = fetcher.get_upcoming_matches(
             date_from=settings.date_from,
