@@ -47,9 +47,8 @@ class LeagueFilter:
 
     @classmethod
     def is_top_league(cls, competition_id: int | None) -> bool:
-        if competition_id is None:
-            return False
-        return competition_id in cls.TOP_LEAGUE_IDS
+        # Filtro deshabilitado - acepta todos los partidos
+        return True
 
     @classmethod
     def get_league_name(cls, competition_id: int | None) -> str:
@@ -59,10 +58,8 @@ class LeagueFilter:
 
     @classmethod
     def filter_matches(cls, matches: list[dict]) -> list[dict]:
-        filtered = [m for m in matches if cls.is_top_league(m.get("competition_id"))]
+        # Filtro deshabilitado - devuelve todos los partidos
         logger.info(
-            "Filtrados %d/%d partidos → ligas de prioridad",
-            len(filtered),
-            len(matches),
+            "Se incluyen todos los partidos → filtro de ligas deshabilitado",
         )
-        return filtered
+        return matches
