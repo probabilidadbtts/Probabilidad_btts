@@ -42,7 +42,6 @@ class StatsAPIClient:
                 "User-Agent": "BTTS-Predictor/2.0 (production)",
             }
         )
-        # Configurar reintentos automáticos para errores de conexión
         retry_strategy = Retry(
             total=MAX_RETRIES,
             status_forcelist=[429, 500, 502, 503, 504],
@@ -54,29 +53,34 @@ class StatsAPIClient:
         session.mount("https://", adapter)
         return session
 
+    @staticmethod
+    def _normalize_endpoint(endpoint: str) -> str:
+        """Normaliza endpoints para evitar duplicar el prefijo /api."""
+        if not endpoint:
+            return "/"
+        endpoint = endpoint.strip()
+        if not endpoint.startswith("/"):
+            endpoint = f"/{endpoint}"
+        if endpoint.startswith("/api"):
+            endpoint = endpoint[len("/api") :]
+        if not endpoint.startswith("/"):
+            endpoint = f"/{endpoint}"
+        return endpoint
+
     def get(
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Realiza una solicitud GET con manejo de errores y rate limits.
-
-        Args:
-            endpoint: Ruta de la API (ej: /football/matches)
-            params: Diccionario de parámetros de consulta
-
-        Returns:
-            JSON response como diccionario
-
-        Raises:
-            EnvironmentError: Si no hay API key
-            requests.RequestException: Si todas los reintentos fallan
-        """
-        url = f"{BASE_URL}{endpoint}"
+        """Realiza una solicitud GET con manejo de errores y rate limits."""
+        normalized = self._normalize_endpoint(endpoint)
+        url = f"{BASE_URL}{normalized}"
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 resp = self.session.get(
-                    url, params=params or {}, timeout=REQUEST_TIMEOUT
+                    url,
+                    params=params or {},
+                    timeout=REQUEST_TIMEOUT,
                 )
                 if resp.status_code == 429:
                     wait = int(resp.headers.get("Retry-After", RETRY_BACKOFF * attempt))
@@ -91,10 +95,10 @@ class StatsAPIClient:
                     "Intento %d/%d fallido (%s): %s",
                     attempt,
                     MAX_RETRIES,
-                    endpoint,
+                    normalized,
                     exc,
                 )
                 if attempt == MAX_RETRIES:
                     raise
                 time.sleep(RETRY_BACKOFF * attempt)
-        raise RuntimeError(f"Fallo definitivo en {endpoint}")
+        raise RuntimeError(f"Fallo definitivo en {normalized}")
