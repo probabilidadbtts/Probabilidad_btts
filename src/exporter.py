@@ -58,6 +58,7 @@ def print_table(results: List[Dict[str, Any]], min_pct: float) -> None:
     except ImportError:  # pragma: no cover
         print(table)
     print(f"\nTop {len(results)} partidos con Ensemble BTTS > {min_pct}% (ajustado por bajas)\n")
+    print("Nota: Datos de bajas obtenidos del roster del equipo si están disponibles.\n")
 
 
 def export_csv(results: List[Dict[str, Any]], date_from: str, date_to: str) -> str:
