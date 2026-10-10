@@ -1,11 +1,9 @@
 name: Daily BTTS Predictor
 
 on:
-  # Ejecución automática todos los días a las 06:00 UTC → solo partidos de HOY
   schedule:
     - cron: "0 6 * * *"
 
-  # Ejecución manual con selector de fechas
   workflow_dispatch:
     inputs:
       date_from:
@@ -52,14 +50,12 @@ jobs:
       - name: Determinar rango de fechas
         id: dates
         run: |
-          # Si es schedule → forzamos solo HOY
           if [ "${{ github.event_name }}" = "schedule" ]; then
             TODAY=$(date -u +%Y-%m-%d)
             echo "date_from=$TODAY" >> $GITHUB_OUTPUT
             echo "date_to=$TODAY" >> $GITHUB_OUTPUT
             echo "Modo schedule → solo partidos de hoy: $TODAY"
           else
-            # workflow_dispatch
             DF="${{ github.event.inputs.date_from }}"
             DT="${{ github.event.inputs.date_to }}"
             if [ -z "$DF" ]; then
