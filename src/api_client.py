@@ -1,7 +1,7 @@
 # src/api_client.py
 """
 Cliente HTTP robusto para TheStatsAPI.
-- Rate limiting proactivo (token bucket)
+- Rate limiting proactivo (token bucket) — plan 1000 req/min
 - Reintento con backoff exponencial + jitter (sin doble retry)
 - Respeta Retry-After del servidor
 - Caché local con TTL por tipo de endpoint
@@ -30,7 +30,12 @@ BACKOFF_BASE = 2.0       # segundos
 BACKOFF_MAX = 60.0       # tope de espera
 JITTER = 0.2             # ±20%
 
-# TTL de caché en segundos, por prefijo de endpoint
+# Plan actual: 1000 requests/minuto
+DEFAULT_MAX_RPM = int(os.environ.get("MAX_RPM", "1000"))
+
+# TTL de caché en segundos, por prefijo de endpoint.
+# Con 1000 req/min el caché ya no es obligatorio por cuota;
+# se mantiene como red de seguridad ante cortes y para acelerar re-runs.
 CACHE_TTL: dict[str, int] = {
     "/football/matches/": 3600,           # 1h: lineups (cambian cerca del pitazo)
     "/football/matches": 6 * 3600,        # 6h: historial/partidos
@@ -46,12 +51,13 @@ DEFAULT_TTL = 3600
 class RateLimiter:
     """
     Token bucket: garantiza no superar `max_rpm` requests por minuto.
-    Starter plan TheStatsAPI = 120 req/min.
+    Plan actual TheStatsAPI = 1000 req/min.
     """
 
-    def __init__(self, max_rpm: int = 120):
-        self.max_rpm = max_rpm
-        self.min_interval = 60.0 / max_rpm
+    def __init__(self, max_rpm: int = DEFAULT_MAX_RPM):
+        # Margen de seguridad del 10%: nunca superar el límite real del plan
+        self.max_rpm = max(1, int(max_rpm * 0.9))
+        self.min_interval = 60.0 / self.max_rpm
         self._last_request: float = 0.0
 
     def wait(self) -> None:
@@ -68,16 +74,16 @@ class RateLimiter:
 class StatsAPIClient:
     """
     Cliente de TheStatsAPI con:
-    - Rate limiting proactivo
+    - Rate limiting proactivo (1000 req/min con margen de seguridad)
     - Backoff exponencial con jitter
     - Retry-After
-    - Caché local con TTL
+    - Caché local con TTL (opcional)
     """
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        max_rpm: int = 120,
+        max_rpm: int = DEFAULT_MAX_RPM,
         cache_dir: Optional[str] = None,
         use_cache: bool = True,
     ) -> None:
@@ -228,7 +234,8 @@ class StatsAPIClient:
                 # ── 401: Auth error → NO retry, fail fast ──
                 if resp.status_code == 401:
                     logger.error(
-                        "401 Unauthorized. Verifica THESTATSAPI_KEY. URL: %s", url
+                        "401 Unauthorized. Verifica THESTATSAPI_KEY. URL: %s",
+                        url,
                     )
                     resp.raise_for_status()
 
@@ -341,4 +348,7 @@ class StatsAPIClient:
         return self._requests_made
 
     def __repr__(self) -> str:
-        return f"StatsAPIClient(requests_made={self._requests_made})"
+        return (
+            f"StatsAPIClient(requests_made={self._requests_made}, "
+            f"rpm_limit={self.rate_limiter.max_rpm})"
+    )
