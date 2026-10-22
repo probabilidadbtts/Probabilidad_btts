@@ -20,10 +20,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+
+from src.config import Settings
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://api.thestatsapi.com/api"
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 5
 BACKOFF_BASE = 2.0       # segundos
@@ -34,14 +36,12 @@ JITTER = 0.2             # ±20%
 DEFAULT_MAX_RPM = int(os.environ.get("MAX_RPM", "1000"))
 
 # TTL de caché en segundos, por prefijo de endpoint.
-# Con 1000 req/min el caché ya no es obligatorio por cuota;
-# se mantiene como red de seguridad ante cortes y para acelerar re-runs.
 CACHE_TTL: dict[str, int] = {
-    "/football/matches/": 3600,           # 1h: lineups (cambian cerca del pitazo)
-    "/football/matches": 6 * 3600,        # 6h: historial/partidos
-    "/football/teams": 24 * 3600,         # 24h: roster
-    "/football/competitions": 7 * 24 * 3600,  # 7d: competiciones
-    "/odds": 1800,                        # 30min: cuotas
+    "/football/matches/": 3600,
+    "/football/matches": 6 * 3600,
+    "/football/teams": 24 * 3600,
+    "/football/competitions": 7 * 24 * 3600,
+    "/odds": 1800,
 }
 DEFAULT_TTL = 3600
 
@@ -51,17 +51,14 @@ DEFAULT_TTL = 3600
 class RateLimiter:
     """
     Token bucket: garantiza no superar `max_rpm` requests por minuto.
-    Plan actual TheStatsAPI = 1000 req/min.
     """
 
     def __init__(self, max_rpm: int = DEFAULT_MAX_RPM):
-        # Margen de seguridad del 10%: nunca superar el límite real del plan
         self.max_rpm = max(1, int(max_rpm * 0.9))
         self.min_interval = 60.0 / self.max_rpm
         self._last_request: float = 0.0
 
     def wait(self) -> None:
-        """Bloquea hasta que se pueda hacer el siguiente request."""
         now = time.monotonic()
         elapsed = now - self._last_request
         if elapsed < self.min_interval:
@@ -78,27 +75,27 @@ class StatsAPIClient:
     - Backoff exponencial con jitter
     - Retry-After
     - Caché local con TTL (opcional)
+    - Connection pool de 20 conexiones
     """
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        settings: Settings,
         max_rpm: int = DEFAULT_MAX_RPM,
         cache_dir: Optional[str] = None,
         use_cache: bool = True,
     ) -> None:
-        self.api_key = api_key or os.environ.get("THESTATSAPI_KEY")
+        self.api_key = settings.api_key
         if not self.api_key:
             raise EnvironmentError(
-                "THESTATSAPI_KEY no está definida. "
-                "Exporta la variable o usa un archivo .env"
+                "api_key no está definida. "
+                "Exporta THESTATS_API_KEY o pásala en Settings"
             )
+        self.base_url = settings.api_base_url.rstrip("/")
 
         self.rate_limiter = RateLimiter(max_rpm=max_rpm)
         self.use_cache = use_cache
-        self.cache_dir = Path(
-            cache_dir or os.environ.get("CACHE_DIR", "./cache")
-        )
+        self.cache_dir = Path(cache_dir or os.environ.get("CACHE_DIR", "./cache"))
         if self.use_cache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -106,8 +103,15 @@ class StatsAPIClient:
         self._requests_made = 0
 
     def _create_session(self) -> requests.Session:
-        """Sesión SIN Retry de urllib3 (reintento manual único)."""
+        """Sesión con pool de 20 conexiones y sin retry de urllib3."""
         session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=20,
+            pool_maxsize=20,
+            max_retries=0,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
         session.headers.update({
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
@@ -181,7 +185,7 @@ class StatsAPIClient:
     ) -> Dict[str, Any]:
         """GET con rate-limiting proactivo, backoff+jitter, Retry-After y caché."""
         normalized = self._normalize_endpoint(endpoint)
-        url = f"{BASE_URL}{normalized}"
+        url = f"{self.base_url}{normalized}"
         cache_enabled = self.use_cache if use_cache is None else use_cache
         ck = self._cache_key(normalized, params)
         ttl = self._ttl_for(normalized)
@@ -234,7 +238,7 @@ class StatsAPIClient:
                 # ── 401: Auth error → NO retry, fail fast ──
                 if resp.status_code == 401:
                     logger.error(
-                        "401 Unauthorized. Verifica THESTATSAPI_KEY. URL: %s",
+                        "401 Unauthorized. Verifica THESTATS_API_KEY. URL: %s",
                         url,
                     )
                     resp.raise_for_status()
@@ -351,4 +355,4 @@ class StatsAPIClient:
         return (
             f"StatsAPIClient(requests_made={self._requests_made}, "
             f"rpm_limit={self.rate_limiter.max_rpm})"
-    )
+        )   
