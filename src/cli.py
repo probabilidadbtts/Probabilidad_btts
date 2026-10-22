@@ -1,3 +1,4 @@
+# src/cli.py
 from __future__ import annotations
 
 import argparse
@@ -5,8 +6,8 @@ import logging
 import os
 from typing import Sequence
 
-from .api_client import StatsAPIClient
 from .analyzer import BTTSAnalyzer
+from .api_client import StatsAPIClient
 from .config import Settings
 from .data_fetcher import DataFetcher
 from .exporter import export_csv, print_table
@@ -21,9 +22,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--date-from", default=os.environ.get("DATE_FROM", ""))
     parser.add_argument("--date-to", default=os.environ.get("DATE_TO", ""))
-    parser.add_argument("--min-pct", type=float, default=float(os.environ.get("MIN_PCT", "80")))
-    parser.add_argument("--top-n", type=int, default=int(os.environ.get("TOP_N", "20")))
+    parser.add_argument(
+        "--min-pct", type=float,
+        default=float(os.environ.get("MIN_PCT", "80")),
+    )
+    parser.add_argument(
+        "--top-n", type=int, default=int(os.environ.get("TOP_N", "20"))
+    )
+    parser.add_argument(
+        "--min-edge", type=float,
+        default=float(os.environ.get("MIN_EDGE", "0") or 0),
+        help="Edge mínimo vs mercado (0 = desactivado, modo umbral clásico)",
+    )
+    parser.add_argument(
+        "--bankroll", type=float,
+        default=float(os.environ.get("BANKROLL", "100")),
+    )
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--settle", action="store_true",
+        help="Liquida predicciones pendientes y reporta ROI",
+    )
+    parser.add_argument(
+        "--no-odds", action="store_true", help="No consultar cuotas"
+    )
     return parser.parse_args(argv)
 
 
@@ -37,6 +59,8 @@ def cli(argv: Sequence[str] | None = None) -> int:
             "min_pct": args.min_pct,
             "top_n": args.top_n,
             "log_level": args.log_level,
+            "min_edge": args.min_edge,
+            "bankroll": args.bankroll,
         }
     )
 
@@ -50,11 +74,20 @@ def cli(argv: Sequence[str] | None = None) -> int:
     logger.info("Rango de fechas : %s → %s", settings.date_from, settings.date_to)
     logger.info("Umbral mínimo   : %.1f%%", settings.min_pct)
     logger.info("Top N           : %d", settings.top_n)
+    if settings.min_edge > 0:
+        logger.info("Modo value bet  : edge >= %.2f", settings.min_edge)
 
     try:
         client = StatsAPIClient()
         fetcher = DataFetcher(client)
-        analyzer = BTTSAnalyzer(fetcher)
+
+        if args.settle:
+            from .results_tracker import settle
+
+            settle(fetcher)
+            return 0
+
+        analyzer = BTTSAnalyzer(fetcher, client=client)
 
         upcoming = fetcher.get_upcoming_matches(
             date_from=settings.date_from,
@@ -69,12 +102,18 @@ def cli(argv: Sequence[str] | None = None) -> int:
             upcoming,
             min_pct=settings.min_pct,
             top_n=settings.top_n,
+            min_edge=settings.min_edge if settings.min_edge > 0 else None,
+            fetch_odds=not args.no_odds,
         )
 
         print_table(top_results, settings.min_pct)
         export_csv(top_results, settings.date_from, settings.date_to)
+
+        from .results_tracker import log_predictions
+
+        log_predictions(top_results)
         logger.info("Proceso terminado correctamente.")
         return 0
-    except Exception as exc:  # pragma: no cover - código de ejecución
+    except Exception as exc:  # pragma: no cover
         logger.exception("Error fatal: %s", exc)
         return 1
