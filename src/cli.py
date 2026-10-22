@@ -24,37 +24,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--date-to", default=os.environ.get("DATE_TO", ""))
     parser.add_argument(
         "--min-pct", type=float,
-        default=float(os.environ.get("MIN_PCT", "60")),
+        default=float(os.environ.get("MIN_PCT", "80")),
     )
     parser.add_argument(
-        "--top-n", type=int,
-        default=int(os.environ.get("TOP_N", "20")),
+        "--top-n", type=int, default=int(os.environ.get("TOP_N", "20"))
     )
     parser.add_argument(
         "--min-edge", type=float,
-        default=float(os.environ.get("MIN_EDGE", "0")),
+        default=float(os.environ.get("MIN_EDGE", "0") or 0),
         help="Edge mínimo vs mercado (0 = desactivado, modo umbral clásico)",
     )
     parser.add_argument(
         "--bankroll", type=float,
         default=float(os.environ.get("BANKROLL", "100")),
     )
-    parser.add_argument(
-        "--log-level",
-        default=os.environ.get("LOG_LEVEL", "INFO"),
-    )
-    parser.add_argument(
-        "--api-key",
-        default=os.environ.get("THESTATS_API_KEY", ""),
-        help="API key de TheStatsAPI (o env THESTATS_API_KEY)",
-    )
+    parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
     parser.add_argument(
         "--settle", action="store_true",
         help="Liquida predicciones pendientes y reporta ROI",
     )
     parser.add_argument(
-        "--no-odds", action="store_true",
-        help="No consultar cuotas",
+        "--no-odds", action="store_true", help="No consultar cuotas"
     )
     return parser.parse_args(argv)
 
@@ -62,7 +52,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def cli(argv: Sequence[str] | None = None) -> int:
     """Ejecuta el flujo principal de predicción con análisis de bajas."""
     args = parse_args(argv)
-
     settings = Settings.from_dict(
         {
             "date_from": args.date_from,
@@ -72,7 +61,6 @@ def cli(argv: Sequence[str] | None = None) -> int:
             "log_level": args.log_level,
             "min_edge": args.min_edge,
             "bankroll": args.bankroll,
-            "api_key": args.api_key,
         }
     )
 
@@ -90,33 +78,33 @@ def cli(argv: Sequence[str] | None = None) -> int:
         logger.info("Modo value bet  : edge >= %.2f", settings.min_edge)
 
     try:
-        with StatsAPIClient(settings) as client:
-            fetcher = DataFetcher(client)
+        client = StatsAPIClient()
+        fetcher = DataFetcher(client)
 
-            if args.settle:
-                from .results_tracker import settle
+        if args.settle:
+            from .results_tracker import settle
 
-                settle(fetcher)
-                return 0
+            settle(fetcher)
+            return 0
 
-            analyzer = BTTSAnalyzer(fetcher, client=client)
+        analyzer = BTTSAnalyzer(fetcher, client=client)
 
-            upcoming = fetcher.get_upcoming_matches(
-                date_from=settings.date_from,
-                date_to=settings.date_to,
-            )
+        upcoming = fetcher.get_upcoming_matches(
+            date_from=settings.date_from,
+            date_to=settings.date_to,
+        )
 
-            if not upcoming:
-                logger.warning("No se encontraron partidos en el rango indicado.")
-                return 0
+        if not upcoming:
+            logger.warning("No se encontraron partidos en el rango indicado.")
+            return 0
 
-            top_results = analyzer.analyze(
-                upcoming,
-                min_pct=settings.min_pct,
-                top_n=settings.top_n,
-                min_edge=settings.min_edge if settings.min_edge > 0 else None,
-                fetch_odds=not args.no_odds,
-            )
+        top_results = analyzer.analyze(
+            upcoming,
+            min_pct=settings.min_pct,
+            top_n=settings.top_n,
+            min_edge=settings.min_edge if settings.min_edge > 0 else None,
+            fetch_odds=not args.no_odds,
+        )
 
         print_table(top_results, settings.min_pct)
         export_csv(top_results, settings.date_from, settings.date_to)
@@ -128,4 +116,4 @@ def cli(argv: Sequence[str] | None = None) -> int:
         return 0
     except Exception as exc:  # pragma: no cover
         logger.exception("Error fatal: %s", exc)
-        return 1   
+        return 1
