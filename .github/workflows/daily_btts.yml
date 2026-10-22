@@ -44,11 +44,14 @@ jobs:
       - name: Liquidar predicciones de días anteriores
         env:
           THESTATSAPI_KEY: ${{ secrets.THESTATSAPI_KEY }}
+          MAX_RPM: "1000"
         run: python main.py --settle
 
       - name: Ejecutar análisis BTTS
         env:
           THESTATSAPI_KEY: ${{ secrets.THESTATSAPI_KEY }}
+          MAX_RPM: "1000"
+          HISTORY_WORKERS: "20"
           MIN_EDGE: ${{ github.event.inputs.min_edge || '0' }}
         run: |
           python main.py \
