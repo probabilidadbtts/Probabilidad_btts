@@ -1,10 +1,11 @@
+# src/api_client.py
 """
 Cliente HTTP robusto para TheStatsAPI.
 - Rate limiting proactivo (token bucket)
 - Reintento con backoff exponencial + jitter (sin doble retry)
 - Respeta Retry-After del servidor
-- Caché local para evitar re-descargas
-- Tracking de rate-limit headers
+- Caché local con TTL por tipo de endpoint
+- Tracking de requests/costos
 """
 
 from __future__ import annotations
@@ -29,6 +30,16 @@ BACKOFF_BASE = 2.0       # segundos
 BACKOFF_MAX = 60.0       # tope de espera
 JITTER = 0.2             # ±20%
 
+# TTL de caché en segundos, por prefijo de endpoint
+CACHE_TTL: dict[str, int] = {
+    "/football/matches/": 3600,           # 1h: lineups (cambian cerca del pitazo)
+    "/football/matches": 6 * 3600,        # 6h: historial/partidos
+    "/football/teams": 24 * 3600,         # 24h: roster
+    "/football/competitions": 7 * 24 * 3600,  # 7d: competiciones
+    "/odds": 1800,                        # 30min: cuotas
+}
+DEFAULT_TTL = 3600
+
 
 # ─── Rate Limiter (token bucket simplificado) ────────────────────────────────
 
@@ -40,7 +51,7 @@ class RateLimiter:
 
     def __init__(self, max_rpm: int = 120):
         self.max_rpm = max_rpm
-        self.min_interval = 60.0 / max_rpm  # intervalo mínimo entre requests
+        self.min_interval = 60.0 / max_rpm
         self._last_request: float = 0.0
 
     def wait(self) -> None:
@@ -48,8 +59,7 @@ class RateLimiter:
         now = time.monotonic()
         elapsed = now - self._last_request
         if elapsed < self.min_interval:
-            sleep_time = self.min_interval - elapsed
-            time.sleep(sleep_time)
+            time.sleep(self.min_interval - elapsed)
         self._last_request = time.monotonic()
 
 
@@ -58,10 +68,10 @@ class RateLimiter:
 class StatsAPIClient:
     """
     Cliente de TheStatsAPI con:
-    - Rate limiting proactivo (evita 429 antes de que ocurran)
-    - Backoff exponencial con jitter (solo en el bucle manual, NO urllib3)
-    - Respeta Retry-After
-    - Caché local (opcional)
+    - Rate limiting proactivo
+    - Backoff exponencial con jitter
+    - Retry-After
+    - Caché local con TTL
     """
 
     def __init__(
@@ -80,7 +90,9 @@ class StatsAPIClient:
 
         self.rate_limiter = RateLimiter(max_rpm=max_rpm)
         self.use_cache = use_cache
-        self.cache_dir = Path(cache_dir or os.environ.get("CACHE_DIR", "./cache"))
+        self.cache_dir = Path(
+            cache_dir or os.environ.get("CACHE_DIR", "./cache")
+        )
         if self.use_cache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -88,18 +100,13 @@ class StatsAPIClient:
         self._requests_made = 0
 
     def _create_session(self) -> requests.Session:
-        """
-        Sesión SIN Retry de urllib3.
-        Todo el manejo de reintentos se hace en el bucle manual
-        para tener control total sobre Retry-After y jitter.
-        """
+        """Sesión SIN Retry de urllib3 (reintento manual único)."""
         session = requests.Session()
         session.headers.update({
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
-            "User-Agent": "BTTS-Predictor/2.0 (production)",
+            "User-Agent": "BTTS-Predictor/2.1 (production)",
         })
-        # NO montar HTTPAdapter con Retry → evitar doble reintento
         return session
 
     # ─── Caché ───────────────────────────────────────────────────────────────
@@ -112,20 +119,36 @@ class StatsAPIClient:
     def _cache_path(self, key: str) -> Path:
         return self.cache_dir / f"{key}.json"
 
-    def _cache_get(self, key: str) -> Optional[Dict]:
+    @staticmethod
+    def _ttl_for(endpoint: str) -> int:
+        for prefix, ttl in CACHE_TTL.items():
+            if endpoint.startswith(prefix):
+                return ttl
+        return DEFAULT_TTL
+
+    def _cache_get(self, key: str, ttl: int) -> Optional[Dict]:
         if not self.use_cache:
             return None
         path = self._cache_path(key)
-        if path.exists():
+        if not path.exists():
+            return None
+        if time.time() - path.stat().st_mtime > ttl:
+            logger.debug("CACHE EXPIRED: %s", key)
+            return None
+        try:
             with open(path, "r") as f:
                 return json.load(f)
-        return None
+        except (json.JSONDecodeError, OSError):
+            return None
 
     def _cache_set(self, key: str, data: Dict) -> None:
         if not self.use_cache:
             return
-        with open(self._cache_path(key), "w") as f:
-            json.dump(data, f)
+        try:
+            with open(self._cache_path(key), "w") as f:
+                json.dump(data, f)
+        except OSError as exc:
+            logger.debug("No se pudo escribir caché %s: %s", key, exc)
 
     # ─── Normalización ───────────────────────────────────────────────────────
 
@@ -150,17 +173,16 @@ class StatsAPIClient:
         params: Optional[Dict[str, Any]] = None,
         use_cache: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """
-        GET con rate-limiting proactivo, backoff+jitter, Retry-After y caché.
-        """
+        """GET con rate-limiting proactivo, backoff+jitter, Retry-After y caché."""
         normalized = self._normalize_endpoint(endpoint)
         url = f"{BASE_URL}{normalized}"
         cache_enabled = self.use_cache if use_cache is None else use_cache
         ck = self._cache_key(normalized, params)
+        ttl = self._ttl_for(normalized)
 
         # 1. Caché
         if cache_enabled:
-            cached = self._cache_get(ck)
+            cached = self._cache_get(ck, ttl)
             if cached is not None:
                 logger.debug("CACHE HIT: %s", normalized)
                 return cached
@@ -169,11 +191,12 @@ class StatsAPIClient:
         last_exc: Optional[Exception] = None
 
         for attempt in range(1, MAX_RETRIES + 1):
-            # Rate limit proactivo
             self.rate_limiter.wait()
 
             try:
-                resp = self.session.get(url, params=params or {}, timeout=REQUEST_TIMEOUT)
+                resp = self.session.get(
+                    url, params=params or {}, timeout=REQUEST_TIMEOUT
+                )
                 self._requests_made += 1
 
                 # ── 429: Rate limit ──
@@ -183,7 +206,6 @@ class StatsAPIClient:
                         wait = float(retry_after)
                     else:
                         wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
-                    # Jitter ±20%
                     wait *= (1 + random.uniform(-JITTER, JITTER))
                     logger.warning(
                         "429 Rate limit → esperando %.1fs (attempt %d/%d)",
@@ -192,7 +214,7 @@ class StatsAPIClient:
                     time.sleep(wait)
                     continue
 
-                # ── 5xx: Error transitorio del servidor ──
+                # ── 5xx: Error transitorio ──
                 if resp.status_code in (500, 502, 503, 504):
                     wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
                     wait *= (1 + random.uniform(-JITTER, JITTER))
@@ -206,20 +228,21 @@ class StatsAPIClient:
                 # ── 401: Auth error → NO retry, fail fast ──
                 if resp.status_code == 401:
                     logger.error(
-                        "401 Unauthorized. Verifica THESTATSAPI_KEY. "
-                        "URL: %s", url,
+                        "401 Unauthorized. Verifica THESTATSAPI_KEY. URL: %s", url
                     )
                     resp.raise_for_status()
 
                 # ── Otros 4xx: No retry ──
                 if 400 <= resp.status_code < 500:
-                    logger.error("HTTP %d (no retryable): %s", resp.status_code, resp.text[:200])
+                    logger.error(
+                        "HTTP %d (no retryable): %s",
+                        resp.status_code, resp.text[:200],
+                    )
                     resp.raise_for_status()
 
                 # ── 200: Éxito ──
                 data = resp.json()
 
-                # Loggear rate-limit info si el servidor la provee
                 remaining = resp.headers.get("X-RateLimit-Remaining")
                 if remaining is not None:
                     logger.debug("Rate limit remaining: %s", remaining)
@@ -230,25 +253,36 @@ class StatsAPIClient:
                 return data
 
             except requests.Timeout:
-                last_exc = requests.Timeout(f"Timeout after {REQUEST_TIMEOUT}s: {url}")
+                last_exc = requests.Timeout(
+                    f"Timeout after {REQUEST_TIMEOUT}s: {url}"
+                )
                 wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
                 wait *= (1 + random.uniform(-JITTER, JITTER))
-                logger.warning("Timeout → retry en %.1fs (attempt %d/%d)", wait, attempt, MAX_RETRIES)
+                logger.warning(
+                    "Timeout → retry en %.1fs (attempt %d/%d)",
+                    wait, attempt, MAX_RETRIES,
+                )
                 time.sleep(wait)
 
             except requests.ConnectionError as exc:
                 last_exc = exc
                 wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
                 wait *= (1 + random.uniform(-JITTER, JITTER))
-                logger.warning("ConnectionError → retry en %.1fs (attempt %d/%d)", wait, attempt, MAX_RETRIES)
+                logger.warning(
+                    "ConnectionError → retry en %.1fs (attempt %d/%d)",
+                    wait, attempt, MAX_RETRIES,
+                )
                 time.sleep(wait)
 
             except requests.HTTPError:
-                raise  # Ya se logueó arriba
+                raise
 
             except requests.RequestException as exc:
                 last_exc = exc
-                logger.warning("RequestException: %s (attempt %d/%d)", exc, attempt, MAX_RETRIES)
+                logger.warning(
+                    "RequestException: %s (attempt %d/%d)",
+                    exc, attempt, MAX_RETRIES,
+                )
                 if attempt == MAX_RETRIES:
                     break
                 time.sleep(BACKOFF_BASE * attempt)
@@ -266,9 +300,7 @@ class StatsAPIClient:
         params: Optional[Dict[str, Any]] = None,
         per_page: int = 100,
     ) -> list[Dict[str, Any]]:
-        """
-        GET paginado: descarga todas las páginas automáticamente.
-        """
+        """GET paginado: descarga todas las páginas automáticamente."""
         params = dict(params or {})
         params["per_page"] = per_page
         all_items: list[Dict] = []
@@ -282,7 +314,10 @@ class StatsAPIClient:
 
             meta = data.get("meta", {})
             total_pages = meta.get("total_pages", 1)
-            logger.debug("Page %d/%d → %d items (total: %d)", page, total_pages, len(items), len(all_items))
+            logger.debug(
+                "Page %d/%d → %d items (total: %d)",
+                page, total_pages, len(items), len(all_items),
+            )
 
             if page >= total_pages:
                 break
@@ -301,5 +336,9 @@ class StatsAPIClient:
     def __exit__(self, *args) -> None:
         self.close()
 
+    @property
+    def requests_made(self) -> int:
+        return self._requests_made
+
     def __repr__(self) -> str:
-        return f"StatsAPIClient(requests_made={self._requests_made})"   
+        return f"StatsAPIClient(requests_made={self._requests_made})"
