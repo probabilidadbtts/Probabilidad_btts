@@ -1,9 +1,14 @@
 # src/data_fetcher.py
-"""Obtención de partidos futuros e históricos desde TheStatsAPI."""
+"""Obtención de partidos futuros e históricos desde TheStatsAPI.
+
+Con 1000 req/min: se descarga el historial de los equipos en PARALELO
+(ThreadPoolExecutor) en lugar de secuencialmente.
+"""
 
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +16,9 @@ from .api_client import StatsAPIClient
 from .top_leagues import LeagueFilter
 
 logger = logging.getLogger(__name__)
+
+# Con 1000 req/min podemos permitirnos 20 workers concurrentes
+HISTORY_WORKERS = int(__import__("os").environ.get("HISTORY_WORKERS", "20"))
 
 
 class DataFetcher:
@@ -63,7 +71,7 @@ class DataFetcher:
             meta = data.get("meta", {})
             total_pages = meta.get("total_pages", 1)
             logger.info(
-                "Página %d/%d → %d partidos (top leagues) (total: %d)",
+                "Página %d/%d → %d partidos (ligas top) (total: %d)",
                 page, total_pages, len(filtered), len(all_matches),
             )
             if page >= total_pages:
@@ -91,6 +99,43 @@ class DataFetcher:
         matches = data.get("data", [])
         matches.sort(key=lambda m: m.get("utc_date", ""), reverse=True)
         return matches[:n]
+
+    def get_teams_histories(
+        self, team_ids: List[str], n: int = 30
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Descarga el historial de MUCHOS equipos en paralelo.
+
+        Con 1000 req/min, 20 workers descargan ~100 equipos en segundos
+        en lugar de minutos. El RateLimiter del cliente sigue protegiendo
+        el límite global (es thread-safe para este uso: una sola sesión,
+        intervalo mínimo entre requests).
+        """
+        histories: Dict[str, List[Dict[str, Any]]] = {}
+        ids = list(dict.fromkeys(str(t) for t in team_ids if t))
+        logger.info(
+            "Descargando historial de %d equipos (%d workers)...",
+            len(ids), HISTORY_WORKERS,
+        )
+
+        with ThreadPoolExecutor(max_workers=HISTORY_WORKERS) as pool:
+            futures = {
+                pool.submit(self.get_team_finished_matches, tid, n): tid
+                for tid in ids
+            }
+            for fut in as_completed(futures):
+                tid = futures[fut]
+                try:
+                    histories[tid] = fut.result()
+                except Exception as exc:
+                    logger.warning(
+                        "Fallo historial equipo %s: %s", tid, exc
+                    )
+                    histories[tid] = []
+
+        logger.info(
+            "Historiales listos: %d/%d equipos", len(histories), len(ids)
+        )
+        return histories
 
     def get_match(self, match_id, use_cache: bool = False) -> Dict[str, Any]:
         """Obtiene un partido concreto por id."""
