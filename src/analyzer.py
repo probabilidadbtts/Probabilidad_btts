@@ -83,8 +83,18 @@ class BTTSAnalyzer:
         min_edge: Optional[float] = None,
         fetch_odds: bool = True,
     ) -> List[Dict[str, Any]]:
-        team_cache: Dict[str, List[Dict[str, Any]]] = {}
         results: List[Dict[str, Any]] = []
+
+        # ── Precarga masiva de historiales en paralelo (1000 req/min) ──
+        team_ids = []
+        for match in upcoming:
+            home = match.get("home_team") or {}
+            away = match.get("away_team") or {}
+            if home.get("id"):
+                team_ids.append(home["id"])
+            if away.get("id"):
+                team_ids.append(away["id"])
+        team_cache = self.fetcher.get_teams_histories(team_ids, n=30)
 
         for idx, match in enumerate(upcoming, 1):
             home = match.get("home_team") or {}
@@ -100,21 +110,13 @@ class BTTSAnalyzer:
                 idx, len(upcoming), home.get("name"), away.get("name")
             )
 
-            if home_id not in team_cache:
-                team_cache[home_id] = self.fetcher.get_team_finished_matches(
-                    home_id, n=30
-                )
-            if away_id not in team_cache:
-                team_cache[away_id] = self.fetcher.get_team_finished_matches(
-                    away_id, n=30
-                )
+            home_m = team_cache.get(str(home_id), [])
+            away_m = team_cache.get(str(away_id), [])
 
             scores = {}
             for model in self.models:
                 try:
-                    scores[model.name] = model.predict(
-                        team_cache[home_id], team_cache[away_id]
-                    )
+                    scores[model.name] = model.predict(home_m, away_m)
                 except Exception as exc:
                     logger.warning("Modelo %s falló: %s", model.name, exc)
                     scores[model.name] = 0.0
@@ -130,7 +132,6 @@ class BTTSAnalyzer:
                 ensemble, inj["home_injury_impact"], inj["away_injury_impact"]
             )
 
-            # Filtro clásico por umbral (sobre el score ajustado)
             if adjusted < min_pct:
                 continue
 
