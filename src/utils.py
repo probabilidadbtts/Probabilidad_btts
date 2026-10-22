@@ -1,3 +1,4 @@
+# src/utils.py
 """Utilidades compartidas."""
 
 from __future__ import annotations
@@ -11,8 +12,10 @@ def extract_score(match: Dict[str, Any]) -> Tuple[Optional[int], Optional[int]]:
     home = final.get("home") if final.get("home") is not None else score.get("home")
     away = final.get("away") if final.get("away") is not None else score.get("away")
     try:
-        return (int(home) if home is not None else None,
-                int(away) if away is not None else None)
+        return (
+            int(home) if home is not None else None,
+            int(away) if away is not None else None,
+        )
     except (TypeError, ValueError):
         return None, None
 
