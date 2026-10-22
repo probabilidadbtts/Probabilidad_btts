@@ -78,7 +78,7 @@ def cli(argv: Sequence[str] | None = None) -> int:
         logger.info("Modo value bet  : edge >= %.2f", settings.min_edge)
 
     try:
-        client = StatsAPIClient()
+        client = StatsAPIClient(settings)
         fetcher = DataFetcher(client)
 
         if args.settle:
@@ -116,4 +116,4 @@ def cli(argv: Sequence[str] | None = None) -> int:
         return 0
     except Exception as exc:  # pragma: no cover
         logger.exception("Error fatal: %s", exc)
-        return 1
+        return 1   
