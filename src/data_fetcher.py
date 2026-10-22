@@ -1,3 +1,4 @@
+# src/data_fetcher.py
 """Obtención de partidos futuros e históricos desde TheStatsAPI."""
 
 from __future__ import annotations
@@ -24,22 +25,7 @@ class DataFetcher:
         date_to: str = "",
         days_ahead: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Obtiene partidos programados en un rango de fechas.
-
-        Soporta dos formas de llamada:
-        1. Con rango explícito: get_upcoming_matches(date_from='2026-10-09', date_to='2026-10-10')
-        2. Con días adelante (legado): get_upcoming_matches(days_ahead=14)
-
-        Args:
-            date_from: Fecha de inicio (YYYY-MM-DD). Si está vacío y no hay days_ahead,
-                      usa hoy (UTC)
-            date_to: Fecha de fin (YYYY-MM-DD). Si está vacío, usa date_from
-            days_ahead: (Legado) Número de días adelante desde hoy. Ignorado si
-                        date_from o date_to se proporcionan explícitamente.
-
-        Returns:
-            Lista de diccionarios con información de partidos programados.
-        """
+        """Obtiene partidos programados en un rango de fechas."""
         today = datetime.now(timezone.utc).date().isoformat()
 
         if days_ahead is not None and not date_from and not date_to:
@@ -71,37 +57,28 @@ class DataFetcher:
             if not matches:
                 break
 
-            filtered_matches = LeagueFilter.filter_matches(matches)
-            all_matches.extend(filtered_matches)
+            filtered = LeagueFilter.filter_matches(matches)
+            all_matches.extend(filtered)
 
             meta = data.get("meta", {})
             total_pages = meta.get("total_pages", 1)
             logger.info(
                 "Página %d/%d → %d partidos (top leagues) (total: %d)",
-                page,
-                total_pages,
-                len(filtered_matches),
-                len(all_matches),
+                page, total_pages, len(filtered), len(all_matches),
             )
             if page >= total_pages:
                 break
             page += 1
 
-        logger.info("Total partidos futuros (20 ligas top) obtenidos: %d", len(all_matches))
+        logger.info(
+            "Total partidos futuros (ligas top) obtenidos: %d", len(all_matches)
+        )
         return all_matches
 
     def get_team_finished_matches(
         self, team_id: str, n: int = 30
     ) -> List[Dict[str, Any]]:
-        """Obtiene los últimos N partidos finalizados de un equipo.
-
-        Args:
-            team_id: ID del equipo en TheStatsAPI
-            n: Número máximo de partidos a devolver
-
-        Returns:
-            Lista de partidos ordenados (más reciente primero)
-        """
+        """Obtiene los últimos N partidos finalizados de un equipo."""
         data = self.client.get(
             "/football/matches",
             params={
@@ -114,3 +91,10 @@ class DataFetcher:
         matches = data.get("data", [])
         matches.sort(key=lambda m: m.get("utc_date", ""), reverse=True)
         return matches[:n]
+
+    def get_match(self, match_id, use_cache: bool = False) -> Dict[str, Any]:
+        """Obtiene un partido concreto por id."""
+        data = self.client.get(
+            f"/football/matches/{match_id}", use_cache=use_cache
+        )
+        return data.get("data", data)
