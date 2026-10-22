@@ -1,65 +1,145 @@
-"""Listado final de ligas de prioridad para el predictor.
-
-Solo se mantienen competiciones de liga, sin copas ni torneos no permanentes.
-Incluye ligas conocidas de Europa, América y Asia, con MLS y Liga MX.
+"""
+Configuración de competiciones soportadas (ligas + torneos).
 """
 
-from __future__ import annotations
+LEAGUES: dict[str, dict] = {
+    # ─── LIGAS TOP ───────────────────────────────────────────────────────────
+    "premier_league": {
+        "name": "Premier League",
+        "country": "England",
+        "competition_id": "comp_3039",
+        "type": "league",
+    },
+    "bundesliga": {
+        "name": "Bundesliga",
+        "country": "Germany",
+        "competition_id": "comp_4643",
+        "type": "league",
+    },
+    "la_liga": {
+        "name": "La Liga",
+        "country": "Spain",
+        "competition_id": "comp_8814",
+        "type": "league",
+    },
+    "serie_a_ita": {
+        "name": "Serie A",
+        "country": "Italy",
+        "competition_id": "comp_5840",
+        "type": "league",
+    },
+    "ligue_1": {
+        "name": "Ligue 1",
+        "country": "France",
+        "competition_id": "comp_0256",
+        "type": "league",
+    },
+    "brasileirao": {
+        "name": "Brasileirão Série A",
+        "country": "Brazil",
+        "competition_id": "comp_4795",
+        "type": "league",
+    },
+    "liga_profesional_arg": {
+        "name": "Liga Profesional",
+        "country": "Argentina",
+        "competition_id": None,  # lookup
+        "type": "league",
+    },
+    "jupiler_pro": {
+        "name": "Jupiler Pro League",
+        "country": "Belgium",
+        "competition_id": None,  # lookup
+        "type": "league",
+    },
+    "primeira_liga": {
+        "name": "Primeira Liga",
+        "country": "Portugal",
+        "competition_id": None,  # lookup
+        "type": "league",
+    },
+    "championship": {
+        "name": "Championship",
+        "country": "England",
+        "competition_id": "comp_8321",
+        "type": "league",
+    },
+    "liga_mx": {
+        "name": "Liga MX",
+        "country": "Mexico",
+        "competition_id": "comp_298265",  # Apertura; usar lookup para Clausura
+        "type": "league",
+    },
+    "mls": {
+        "name": "MLS",
+        "country": "USA",
+        "competition_id": None,  # lookup
+        "type": "league",
+    },
 
-import logging
-from typing import Dict, Set
+    # ─── TORNEOS UEFA ────────────────────────────────────────────────────────
+    "uefa_europa_league": {
+        "name": "UEFA Europa League",
+        "country": "Europe",
+        "competition_id": "comp_7739",
+        "type": "tournament",
+        "cross_league": True,
+    },
+    "uefa_conference_league": {
+        "name": "UEFA Conference League",
+        "country": "Europe",
+        "competition_id": None,  # lookup — no confirmado en docs públicas
+        "type": "tournament",
+        "cross_league": True,
+    },
+    "uefa_champions_league": {
+        "name": "UEFA Champions League",
+        "country": "Europe",
+        "competition_id": "comp_3498",
+        "type": "tournament",
+        "cross_league": True,
+    },
 
-logger = logging.getLogger(__name__)
-
-TOP_20_LEAGUES: Dict[int, str] = {
-    39: "Premier League",
-    140: "La Liga",
-    135: "Serie A",
-    78: "Bundesliga",
-    61: "Ligue 1",
-    203: "Primeira Liga",
-    94: "Eredivisie",
-    262: "Liga MX",
-    848: "MLS",
-    179: "Super Lig",
-    766: "Saudi Pro League",
-    251: "Chinese Super League",
-    307: "Süper Lig",
-    235: "Ukrainian Premier League",
-    44: "Liga Profesional Argentina",
-    9: "Brasileirão",
-    201: "A-League",
-    24: "Belgian Pro League",
-    31: "Scottish Premiership",
-    72: "Czech First League",
+    # ─── TORNEOS CONMEBOL ───────────────────────────────────────────────────
+    "copa_libertadores": {
+        "name": "CONMEBOL Libertadores",
+        "country": "South America",
+        "competition_id": "comp_0499",
+        "type": "tournament",
+        "cross_league": True,
+    },
+    "copa_sudamericana": {
+        "name": "CONMEBOL Sudamericana",
+        "country": "South America",
+        "competition_id": None,  # lookup
+        "type": "tournament",
+        "cross_league": True,
+    },
 }
 
-LEAGUE_ALIASES: Dict[int, int] = {
-    307: 179,
-    94: 94,
-}
+
+def get_competition_id(key: str) -> str:
+    league = LEAGUES.get(key)
+    if league is None:
+        raise KeyError(f"Competition '{key}' not found. Available: {list(LEAGUES.keys())}")
+    if league["competition_id"]:
+        return league["competition_id"]
+    from .api_client import api_get
+    data = api_get("/football/competitions", {"search": league["name"]})
+    for comp in data.get("data", []):
+        if comp.get("name", "").lower() == league["name"].lower():
+            league["competition_id"] = comp["id"]
+            return comp["id"]
+    raise RuntimeError(f"Could not resolve competition_id for '{league['name']}'")
 
 
-class LeagueFilter:
-    """Filtro para mantener solo ligas de primer nivel."""
+def get_all_keys(competition_type: str = None) -> list[str]:
+    """Devuelve todas las keys, filtradas por tipo si se especifica."""
+    if competition_type is None:
+        return list(LEAGUES.keys())
+    return [k for k, v in LEAGUES.items() if v["type"] == competition_type]
 
-    TOP_LEAGUE_IDS: Set[int] = set(TOP_20_LEAGUES.keys())
 
-    @classmethod
-    def is_top_league(cls, competition_id: int | None) -> bool:
-        # Filtro deshabilitado - acepta todos los partidos
-        return True
-
-    @classmethod
-    def get_league_name(cls, competition_id: int | None) -> str:
-        if competition_id is None:
-            return "Unknown"
-        return TOP_20_LEAGUES.get(competition_id, "Unknown")
-
-    @classmethod
-    def filter_matches(cls, matches: list[dict]) -> list[dict]:
-        # Filtro deshabilitado - devuelve todos los partidos
-        logger.info(
-            "Se incluyen todos los partidos → filtro de ligas deshabilitado",
-        )
-        return matches
+def get_cross_league_keys() -> list[str]:
+    """Competiciones con equipos de múltiples ligas (torneos internacionales)."""
+    return [k for k, v in LEAGUES.items() if v.get("cross_league", False)]   
