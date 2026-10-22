@@ -1,11 +1,13 @@
+# src/analyzer.py
 """Orquestador principal de análisis multi-modelo."""
-
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+import os
+from typing import Any, Dict, List, Optional
 
 from .data_fetcher import DataFetcher
+from .injuries import InjuryImpactAnalyzer
 from .models import (
     BivariatePoisson,
     CatBoostBTTS,
@@ -13,13 +15,35 @@ from .models import (
     LSTMMomentum,
     XGBoostBTTS,
 )
+from .value_betting import extract_match_btts_odds, find_value_bet
 
 logger = logging.getLogger(__name__)
 
 
+def _weights() -> Dict[str, float]:
+    """
+    Pesos del ensemble desde env, ej:
+    MODEL_WEIGHTS=historical:0.15,bivariate_poisson:0.25,lstm_momentum:0.15,
+                  xgboost:0.25,catboost:0.20
+    """
+    raw = os.environ.get("MODEL_WEIGHTS", "")
+    w: Dict[str, float] = {}
+    if raw:
+        for part in raw.split(","):
+            try:
+                k, v = part.split(":")
+                w[k.strip()] = float(v)
+            except ValueError:
+                logger.warning("Peso inválido en MODEL_WEIGHTS: %s", part)
+    return w
+
+
 class BTTSAnalyzer:
-    def __init__(self, fetcher: DataFetcher) -> None:
+    def __init__(self, fetcher: DataFetcher, client=None) -> None:
         self.fetcher = fetcher
+        self.client = client or getattr(fetcher, "client", None)
+        self.injuries = InjuryImpactAnalyzer()
+        self.weights = _weights()
         self.models = [
             HistoricalBTTS(n=10),
             BivariatePoisson(n=20),
@@ -28,11 +52,36 @@ class BTTSAnalyzer:
             CatBoostBTTS(n=15),
         ]
 
+    def _weighted_ensemble(self, scores: Dict[str, float]) -> float:
+        valid = {k: v for k, v in scores.items() if v > 0}
+        if not valid:
+            return 0.0
+        if not self.weights:
+            return round(sum(valid.values()) / len(valid), 2)
+        num = sum(valid[k] * self.weights.get(k, 0.0) for k in valid)
+        den = sum(self.weights.get(k, 0.0) for k in valid)
+        if den <= 0:
+            return round(sum(valid.values()) / len(valid), 2)
+        return round(num / den, 2)
+
+    def _fetch_btts_odds(self, match_id) -> tuple:
+        """Devuelve (odds_yes, odds_no) o (None, None)."""
+        if self.client is None:
+            return None, None
+        try:
+            odds = self.client.get(f"/odds/matches/{match_id}/btts")
+            return extract_match_btts_odds(odds)
+        except Exception as exc:
+            logger.debug("Sin cuotas para match %s: %s", match_id, exc)
+            return None, None
+
     def analyze(
         self,
         upcoming: List[Dict[str, Any]],
         min_pct: float = 80.0,
         top_n: int = 20,
+        min_edge: Optional[float] = None,
+        fetch_odds: bool = True,
     ) -> List[Dict[str, Any]]:
         team_cache: Dict[str, List[Dict[str, Any]]] = {}
         results: List[Dict[str, Any]] = []
@@ -42,6 +91,7 @@ class BTTSAnalyzer:
             away = match.get("away_team") or {}
             home_id = home.get("id")
             away_id = away.get("id")
+            match_id = match.get("id")
             if not home_id or not away_id:
                 continue
 
@@ -51,39 +101,82 @@ class BTTSAnalyzer:
             )
 
             if home_id not in team_cache:
-                team_cache[home_id] = self.fetcher.get_team_finished_matches(home_id, n=30)
+                team_cache[home_id] = self.fetcher.get_team_finished_matches(
+                    home_id, n=30
+                )
             if away_id not in team_cache:
-                team_cache[away_id] = self.fetcher.get_team_finished_matches(away_id, n=30)
-
-            home_m = team_cache[home_id]
-            away_m = team_cache[away_id]
+                team_cache[away_id] = self.fetcher.get_team_finished_matches(
+                    away_id, n=30
+                )
 
             scores = {}
             for model in self.models:
                 try:
-                    scores[model.name] = model.predict(home_m, away_m)
+                    scores[model.name] = model.predict(
+                        team_cache[home_id], team_cache[away_id]
+                    )
                 except Exception as exc:
                     logger.warning("Modelo %s falló: %s", model.name, exc)
                     scores[model.name] = 0.0
 
-            # Ensemble: promedio de todos los modelos
-            valid = [v for v in scores.values() if v > 0]
-            ensemble = round(sum(valid) / len(valid), 2) if valid else 0.0
+            ensemble = self._weighted_ensemble(scores)
 
-            if ensemble > min_pct:
-                results.append(
-                    {
-                        "match_id": match.get("id"),
-                        "utc_date": match.get("utc_date"),
-                        "competition_id": match.get("competition_id"),
-                        "home_team": home.get("name"),
-                        "away_team": away.get("name"),
-                        "home_team_id": home_id,
-                        "away_team_id": away_id,
-                        **{f"prob_{k}": v for k, v in scores.items()},
-                        "ensemble_pct": ensemble,
-                    }
-                )
+            # ── Bajas reales (1 solo fetch de lineups por partido) ──
+            inj = self.injuries.analyze_injuries(
+                home_id, away_id, self.client, match_id=match_id,
+                home_name=home.get("name"), away_name=away.get("name"),
+            )
+            adjusted = self.injuries.adjust_ensemble_by_injuries(
+                ensemble, inj["home_injury_impact"], inj["away_injury_impact"]
+            )
 
-        results.sort(key=lambda r: r["ensemble_pct"], reverse=True)
+            # Filtro clásico por umbral (sobre el score ajustado)
+            if adjusted < min_pct:
+                continue
+
+            row: Dict[str, Any] = {
+                "match_id": match_id,
+                "utc_date": match.get("utc_date"),
+                "competition_id": match.get("competition_id"),
+                "home_team": home.get("name"),
+                "away_team": away.get("name"),
+                "home_team_id": home_id,
+                "away_team_id": away_id,
+                **{f"prob_{k}": v for k, v in scores.items()},
+                "ensemble_pct": ensemble,
+                "adjusted_ensemble_pct": adjusted,
+                "home_injury_impact": inj["home_injury_impact"],
+                "away_injury_impact": inj["away_injury_impact"],
+                "injuries_home": len(inj["home_injuries"]),
+                "injuries_away": len(inj["away_injuries"]),
+                "min_edge_mode": min_edge is not None,
+            }
+
+            # ── Value betting ──
+            if fetch_odds and self.client is not None:
+                o_yes, o_no = self._fetch_btts_odds(match_id)
+                if o_yes and o_no:
+                    row["odds_yes"], row["odds_no"] = o_yes, o_no
+                    vb = find_value_bet(
+                        adjusted / 100, o_yes, o_no,
+                        min_edge=min_edge if min_edge is not None else 0.03,
+                    )
+                    if vb:
+                        row.update({
+                            "edge": vb["edge"],
+                            "ev": vb["ev"],
+                            "p_market_fair": vb["p_market_fair"],
+                            "kelly_stake": vb["kelly_fraction"],
+                        })
+                if min_edge is not None and row.get("edge", 0) < min_edge:
+                    continue
+
+            results.append(row)
+
+        if min_edge is not None:
+            results.sort(key=lambda r: r.get("edge", 0), reverse=True)
+        else:
+            results.sort(
+                key=lambda r: r["adjusted_ensemble_pct"], reverse=True
+            )
         return results[:top_n]
