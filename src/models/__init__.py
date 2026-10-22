@@ -1,13 +1,18 @@
-from .historical import HistoricalBTTS
+# src/models/__init__.py
+"""Modelos BTTS disponibles."""
+
+from .base import BaseBTTSModel
 from .bivariate_poisson import BivariatePoisson
+from .catboost_model import CatBoostBTTS
+from .historical import HistoricalBTTS
 from .lstm_momentum import LSTMMomentum
 from .xgboost_model import XGBoostBTTS
-from .catboost_model import CatBoostBTTS
 
 __all__ = [
-    "HistoricalBTTS",
+    "BaseBTTSModel",
     "BivariatePoisson",
+    "CatBoostBTTS",
+    "HistoricalBTTS",
     "LSTMMomentum",
     "XGBoostBTTS",
-    "CatBoostBTTS",
 ]
