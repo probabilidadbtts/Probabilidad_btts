@@ -1,5 +1,5 @@
-"""Clase base para todos los modelos de BTTS."""
-
+# src/models/base.py
+"""Contrato común de los modelos BTTS."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -11,11 +11,7 @@ class BaseBTTSModel(ABC):
 
     @abstractmethod
     def predict(
-        self,
-        home_matches: List[Dict[str, Any]],
-        away_matches: List[Dict[str, Any]],
+        self, home_matches: List[Dict[str, Any]], away_matches: List[Dict[str, Any]]
     ) -> float:
-        """
-        Devuelve probabilidad de BTTS en escala 0-100.
-        """
-        ...
+        """Devuelve probabilidad BTTS en porcentaje 0-100."""
+        raise NotImplementedError
