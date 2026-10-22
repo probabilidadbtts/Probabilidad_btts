@@ -1,3 +1,4 @@
+# src/value_betting.py
 """
 Módulo de value betting: EV, vig removal, Kelly fraccional.
 Convierte probabilidad del modelo en decisión de apuesta rentable.
@@ -35,7 +36,6 @@ def kelly_stake(p: float, odds: float, fraction: float = 0.25) -> float:
     """
     Kelly fraccional.
     f* = (p*b - q) / b, donde b = odds-1, q = 1-p.
-    Se aplica `fraction` (default 0.25) para reducir varianza.
     Devuelve fracción del bankroll a apostar (0 si no hay edge).
     """
     b = odds - 1
@@ -72,9 +72,30 @@ def find_value_bet(
             "p_model": round(p_model, 4),
             "p_market_fair": round(p_market_fair, 4),
             "odds": odds_yes,
-            "kelly_fraction": round(kelly_stake(p_model, odds_yes, kelly_fraction), 4),
+            "kelly_fraction": round(
+                kelly_stake(p_model, odds_yes, kelly_fraction), 4
+            ),
         }
     return None
+
+
+def extract_match_btts_odds(odds_data: dict) -> tuple[Optional[float], Optional[float]]:
+    """
+    Extrae las cuotas BTTS yes/no del primer bookmaker disponible.
+    Devuelve (odds_yes, odds_no) con None si no hay datos.
+    """
+    for bk in odds_data.get("bookmakers", []) or []:
+        btts = (bk.get("markets") or {}).get("btts", {})
+        yes = btts.get("yes", {})
+        no = btts.get("no", {})
+        o_yes = yes.get("last_seen") or yes.get("opening")
+        o_no = no.get("last_seen") or no.get("opening")
+        if o_yes and o_no:
+            try:
+                return float(o_yes), float(o_no)
+            except (ValueError, TypeError):
+                continue
+    return None, None
 
 
 def best_odds_btts_yes(odds_data: dict) -> tuple[Optional[float], str]:
@@ -84,10 +105,9 @@ def best_odds_btts_yes(odds_data: dict) -> tuple[Optional[float], str]:
     """
     best_odds = 0.0
     best_book = ""
-    for bk in odds_data.get("bookmakers", []):
-        btts = bk.get("markets", {}).get("btts", {})
+    for bk in odds_data.get("bookmakers", []) or []:
+        btts = (bk.get("markets") or {}).get("btts", {})
         yes = btts.get("yes", {})
-        # Preferir last_seen (cierre), fallback a opening
         val = yes.get("last_seen") or yes.get("opening")
         if val:
             try:
@@ -97,4 +117,4 @@ def best_odds_btts_yes(odds_data: dict) -> tuple[Optional[float], str]:
                     best_book = bk.get("bookmaker", "")
             except (ValueError, TypeError):
                 pass
-    return (best_odds if best_odds > 0 else None), best_book   
+    return (best_odds if best_odds > 0 else None), best_book
