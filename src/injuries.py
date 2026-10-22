@@ -1,3 +1,4 @@
+# src/injuries.py
 """Modelo de análisis de bajas y su impacto en las predicciones BTTS."""
 
 from __future__ import annotations
@@ -9,36 +10,9 @@ from .lineups import LineupAnalyzer
 
 logger = logging.getLogger(__name__)
 
-# Categorías de jugadores por impacto en BTTS
-CRITICAL_POSITIONS = {"STRIKER", "FORWARD", "CENTRE-FORWARD", "CF", "ST"}
-HIGH_IMPACT_POSITIONS = {"ATTACKING MIDFIELD", "LEFT WINGER", "RIGHT WINGER", "AM", "LW", "RW"}
-MID_IMPACT_POSITIONS = {"MIDFIELD", "CENTRE MIDFIELD", "CM", "CAM"}
-DEFENCE_POSITIONS = {"DEFENDER", "LEFT-BACK", "RIGHT-BACK", "CENTRE-BACK", "CB", "LB", "RB"}
-GOALKEEPER_POSITIONS = {"GOALKEEPER", "GK"}
-
 
 class InjuryImpactAnalyzer:
     """Analiza el impacto de bajas usando la alineación confirmada cuando existe."""
-
-    @staticmethod
-    def _normalize_position(position: str) -> str:
-        return (position or "").strip().upper()
-
-    @classmethod
-    def _categorize_player_impact(cls, position: str) -> float:
-        norm = cls._normalize_position(position)
-
-        if any(token in norm for token in CRITICAL_POSITIONS):
-            return 0.90
-        if any(token in norm for token in HIGH_IMPACT_POSITIONS):
-            return 0.75
-        if any(token in norm for token in MID_IMPACT_POSITIONS):
-            return 0.50
-        if any(token in norm for token in DEFENCE_POSITIONS):
-            return 0.40
-        if any(token in norm for token in GOALKEEPER_POSITIONS):
-            return 0.70
-        return 0.30
 
     def analyze_injuries(
         self,
@@ -51,85 +25,43 @@ class InjuryImpactAnalyzer:
     ) -> Dict[str, Any]:
         """Obtiene y analiza bajas reales desde lineups confirmados.
 
-        Si no hay lineups confirmados, cae a heurística conservadora de roster.
+        Hace UN solo fetch de lineups por partido y lo comparte entre
+        local y visitante. Fallback seguro si no hay lineups confirmados.
         """
+        empty = {
+            "home_injuries": [],
+            "away_injuries": [],
+            "home_injury_impact": 0.0,
+            "away_injury_impact": 0.0,
+            "combined_injury_severity": 0.0,
+        }
         try:
-            if match_id is not None:
-                home_lineup = LineupAnalyzer.analyze_match_lineups(
-                    client,
-                    match_id,
-                    team_name=home_name,
-                )
-                away_lineup = LineupAnalyzer.analyze_match_lineups(
-                    client,
-                    match_id,
-                    team_name=away_name,
-                )
+            if match_id is None:
+                return empty
 
-                if home_lineup.get("confirmed") or away_lineup.get("confirmed"):
-                    return {
-                        "home_injuries": home_lineup.get("absences", []),
-                        "away_injuries": away_lineup.get("absences", []),
-                        "home_injury_impact": home_lineup.get("impact", 0.0),
-                        "away_injury_impact": away_lineup.get("impact", 0.0),
-                        "combined_injury_severity": home_lineup.get("impact", 0.0)
-                        + away_lineup.get("impact", 0.0),
-                    }
+            raw = LineupAnalyzer.fetch_lineups(client, match_id)
+            if not raw:
+                return empty
 
-            # Fallback seguro: no hay lineups confirmados, no inventamos impacto.
+            home_l = LineupAnalyzer.analyze_match_lineups(
+                client, match_id, home_name, raw_payload=raw
+            )
+            away_l = LineupAnalyzer.analyze_match_lineups(
+                client, match_id, away_name, raw_payload=raw
+            )
+
             return {
-                "home_injuries": [],
-                "away_injuries": [],
-                "home_injury_impact": 0.0,
-                "away_injury_impact": 0.0,
-                "combined_injury_severity": 0.0,
+                "home_injuries": home_l["absences"],
+                "away_injuries": away_l["absences"],
+                "home_injury_impact": home_l["impact"],
+                "away_injury_impact": away_l["impact"],
+                "combined_injury_severity": round(
+                    min(home_l["impact"] + away_l["impact"], 0.90), 2
+                ),
             }
         except Exception as exc:
             logger.debug("Error al obtener bajas: %s", exc)
-            return {
-                "home_injuries": [],
-                "away_injuries": [],
-                "home_injury_impact": 0.0,
-                "away_injury_impact": 0.0,
-                "combined_injury_severity": 0.0,
-            }
-
-    @staticmethod
-    def _fetch_team_roster_absences(team_id: str, client: Any) -> List[Dict[str, Any]]:
-        """Mantiene compatibilidad con la versión anterior, pero no se usa si hay lineups."""
-        try:
-            data = client.get(f"/football/teams/{team_id}")
-            squad = data.get("squad", []) or data.get("roster", [])
-            unavailable = []
-            for player in squad:
-                status = player.get("status", "").lower()
-                if status in ["unavailable", "injured", "suspended", "out"]:
-                    unavailable.append(
-                        {
-                            "player": player.get("name", ""),
-                            "position": player.get("position", ""),
-                            "status": status,
-                            "reason": player.get("reason", player.get("status", "")),
-                        }
-                    )
-            return unavailable
-        except Exception as exc:
-            logger.debug("No se pudo obtener roster para equipo %s: %s", team_id, exc)
-            return []
-
-    def _calculate_injury_impact(self, injuries: Iterable[Dict[str, Any]]) -> float:
-        total_impact = 0.0
-        num_relevant = 0
-        for injury in injuries:
-            position = injury.get("position", "")
-            impact = self._categorize_player_impact(position)
-            if impact > 0.3:
-                total_impact += impact
-                num_relevant += 1
-        if num_relevant == 0:
-            return 0.0
-        avg_impact = total_impact / num_relevant
-        return min(avg_impact, 0.80)
+            return empty
 
     @staticmethod
     def adjust_ensemble_by_injuries(
@@ -143,7 +75,6 @@ class InjuryImpactAnalyzer:
 
         if home_injury_impact > 0.5:
             ensemble_score *= 1.0 - (home_injury_impact * 0.20)
-
         if away_injury_impact > 0.5:
             ensemble_score *= 1.0 - (away_injury_impact * 0.20)
 
