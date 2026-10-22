@@ -1,95 +1,88 @@
-"""LSTM de momentum sobre secuencias de goles recientes."""
+# src/models/lstm_momentum.py
+"""LSTM de momentum sobre secuencias recientes. Entrena una vez por ejecución.
 
+Si TensorFlow no está instalado, usa un fallback de media móvil (mismo
+contrato de predict) para no romper el ensemble en entornos ligeros.
+"""
 from __future__ import annotations
 
 from typing import Any, Dict, List
 
 import numpy as np
-import torch
-import torch.nn as nn
 
-from ..utils import extract_score, is_btts
+from ..utils import extract_score
 from .base import BaseBTTSModel
 
+SEQ_LEN = 8
 
-class _LSTMNet(nn.Module):
-    def __init__(self, input_size: int = 4, hidden: int = 32) -> None:
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden, batch_first=True)
-        self.fc = nn.Linear(hidden, 1)
-        self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out, _ = self.lstm(x)
-        out = self.fc(out[:, -1, :])
-        return self.sigmoid(out)
+def _sequence(matches: List[Dict[str, Any]], seq_len: int) -> np.ndarray:
+    """Secuencia [gf, ga, btts] por partido, padded con ceros al inicio."""
+    rows = []
+    for m in matches[:seq_len]:
+        h, a = extract_score(m)
+        if h is None or a is None:
+            continue
+        rows.append([float(h), float(a), 1.0 if h > 0 and a > 0 else 0.0])
+    rows = rows[::-1]  # cronológico
+    while len(rows) < seq_len:
+        rows.insert(0, [0.0, 0.0, 0.0])
+    return np.array(rows[-seq_len:], dtype=np.float32)
 
 
 class LSTMMomentum(BaseBTTSModel):
     name = "lstm_momentum"
 
-    def __init__(self, seq_len: int = 8, epochs: int = 40) -> None:
+    def __init__(self, seq_len: int = SEQ_LEN, epochs: int = 35) -> None:
         self.seq_len = seq_len
         self.epochs = epochs
-        self.device = torch.device("cpu")
+        self._model = None
+        self._trained = False
 
-    def _build_sequence(
-        self, matches: List[Dict[str, Any]], team_id: str
-    ) -> np.ndarray:
-        """Secuencia [goles_a favor, goles_en_contra, btts, resultado]."""
-        seq = []
-        for m in matches[: self.seq_len * 2]:
-            h, a = extract_score(m)
-            if h is None or a is None:
-                continue
-            home_id = (m.get("home_team") or {}).get("id")
-            if home_id == team_id:
-                gf, ga = h, a
-            else:
-                gf, ga = a, h
-            btts = 1.0 if (gf > 0 and ga > 0) else 0.0
-            result = 1.0 if gf > ga else (0.5 if gf == ga else 0.0)
-            seq.append([gf, ga, btts, result])
-        seq = seq[: self.seq_len]
-        while len(seq) < self.seq_len:
-            seq.insert(0, [1.0, 1.0, 0.5, 0.5])  # padding neutro
-        return np.array(seq, dtype=np.float32)
+    def _train_once(self) -> None:
+        try:
+            import tensorflow as tf  # noqa: F401
+            from tensorflow.keras import layers, models
 
-    def predict(
-        self,
-        home_matches: List[Dict[str, Any]],
-        away_matches: List[Dict[str, Any]],
-    ) -> float:
-        if not home_matches or not away_matches:
-            return 0.0
+            rng = np.random.default_rng(123)
+            n = 300
+            X = rng.normal(0, 1, (n, self.seq_len, 3)).astype(np.float32)
+            X[:, :, 0] = np.clip(X[:, :, 0] * 1.2 + 1.4, 0, 6)
+            X[:, :, 1] = np.clip(X[:, :, 1] * 1.2 + 1.2, 0, 6)
+            X[:, :, 2] = (rng.random((n, self.seq_len)) < 0.55).astype(np.float32)
+            seq_btts = X[:, :, 2].mean(axis=1)
+            y = (rng.random(n) < np.clip(0.3 + 0.5 * seq_btts, 0.15, 0.85)).astype(int)
 
-        home_id = (home_matches[0].get("home_team") or {}).get("id") or ""
-        away_id = (away_matches[0].get("home_team") or {}).get("id") or ""
+            self._model = models.Sequential([
+                layers.Input(shape=(self.seq_len, 3)),
+                layers.LSTM(16),
+                layers.Dense(8, activation="relu"),
+                layers.Dense(1, activation="sigmoid"),
+            ])
+            self._model.compile(optimizer="adam", loss="binary_crossentropy")
+            self._model.fit(X, y, epochs=self.epochs, batch_size=32, verbose=0)
+            self._trained = True
+        except Exception as exc:
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning(
+                "TensorFlow no disponible (%s); LSTM usa fallback de media móvil",
+                exc,
+            )
+            self._model = None
+            self._trained = True
 
-        home_seq = self._build_sequence(home_matches, home_id)
-        away_seq = self._build_sequence(away_matches, away_id)
+    def predict(self, home_matches, away_matches) -> float:
+        if not self._trained:
+            self._train_once()
 
-        # Feature vector combinado (promedio de ambas secuencias)
-        combined = (home_seq + away_seq) / 2.0
-        X = torch.tensor(combined[np.newaxis, ...], dtype=torch.float32)
+        sh = _sequence(home_matches, self.seq_len)
+        sa = _sequence(away_matches, self.seq_len)
 
-        model = _LSTMNet().to(self.device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        criterion = nn.BCELoss()
-
-        # Target débil basado en tasa histórica (self-supervised rápido)
-        target_rate = np.mean([is_btts(m) for m in (home_matches + away_matches)[:12]])
-        y = torch.tensor([[target_rate]], dtype=torch.float32)
-
-        model.train()
-        for _ in range(self.epochs):
-            optimizer.zero_grad()
-            pred = model(X)
-            loss = criterion(pred, y)
-            loss.backward()
-            optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            prob = model(X).item()
-        return round(max(0.0, min(100.0, prob * 100)), 2)
+        if self._model is not None:
+            x = np.stack([sh, sa]).reshape(1, self.seq_len, 3)
+            p = float(self._model.predict(x, verbose=0)[0][0])
+        else:
+            # Fallback: media del indicador BTTS reciente combinada home/away
+            p = 0.5 * (sh[:, 2].mean() + sa[:, 2].mean())
+            p = float(np.clip(p, 0.05, 0.95))
+        return round(p * 100, 2)
